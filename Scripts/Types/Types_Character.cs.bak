@@ -1,0 +1,16 @@
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+
+[Serializable]
+public class Character {
+  public string name, nameUI, desc;
+  public Sprite portrait;
+}
+
+[Serializable]
+public class ReferencePoint {
+  public string name;
+  public Vector2 position;
+}

@@ -1,0 +1,642 @@
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+
+public class MovementController : MonoBehaviour {
+  public static MovementController I;
+  // Allows specific systems (e.g., drag-aim) to temporarily enable player rotation on mobile
+  public static bool AllowPlayerRotationOnMobileOverride = false;
+  // Allows modules to suppress movement-driven facing for the player (e.g. smooth aim weapons).
+  public static bool SuppressPlayerFacingFromMovement = false;
+  void Awake() {
+    if (gameObject.scene != null && gameObject.scene.IsValid())
+    {
+      if (gameObject.scene.name != "Game")
+      {
+        Destroy(gameObject);
+        return;
+      }
+    }
+
+    if (I == null) { I = this; } 
+    else { Destroy(gameObject);}
+  }
+
+  #region -- Regular Linear Movement --
+  public void SetWalk(InGameObject _obj, float _velocity, float _angle, float _duration){
+    // Redirect to LinearMove to achieve constant-speed walk
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    _obj.velocity = 0f;
+    _obj.velocityDuration = 0f;
+
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (!(isPlayer && SuppressPlayerFacingFromMovement)){
+      _obj.angle = _angle;
+    }
+
+    _obj.isRunning = true;
+
+    SetLinearMove(_obj, _velocity, _angle);
+  }
+
+  public void StopVelocity(InGameObject _obj){
+    // Redirect to stop LinearMove as well
+    StopLinearMove(_obj);
+    _obj.velocity = 0f;
+    _obj.velocityDuration = 0f;
+    _obj.isRunning = false;
+  }
+
+  public void MoveUpdate(InGameObject _obj){
+    UpdateTimedLife(_obj);
+    UpdateHoming(_obj);
+    UpdateLinearMove(_obj);
+    UpdateMoveToTarget(_obj);
+    UpdateDash(_obj);
+
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    bool isMovingLinearly = (_obj.isLinearMoving && _obj.linearSpeed > 0f);
+
+    bool allowMoveTrailForPlayer = (isPlayer && !_obj.isDash && _obj.hasMoveInput && isMovingLinearly);
+
+    bool allowMoveTrailForEnemyCombatSuit = false;
+    if (!isPlayer && !_obj.isDash && isMovingLinearly && string.Equals(_obj.type, "Character"))
+    {
+      string objNameLower = _obj.name != null ? _obj.name.ToLowerInvariant() : "";
+      string gameObjectNameLower = _obj.gameObject != null ? _obj.gameObject.name.ToLowerInvariant() : "";
+      bool isTargetEnemySuit =
+        objNameLower.Contains("arashi") || objNameLower.Contains("aegis") || objNameLower.Contains("siegfried") ||
+        gameObjectNameLower.Contains("arashi") || gameObjectNameLower.Contains("aegis") || gameObjectNameLower.Contains("siegfried");
+
+      allowMoveTrailForEnemyCombatSuit = isTargetEnemySuit;
+    }
+
+    if (allowMoveTrailForPlayer || allowMoveTrailForEnemyCombatSuit)
+    {
+      _obj.moveTrailFrameCounter++;
+
+      int spawnEveryFrames = allowMoveTrailForEnemyCombatSuit ? 18 : 12;
+      if (_obj.moveTrailFrameCounter >= spawnEveryFrames)
+      {
+        if (EffectsController.I != null)
+        {
+          float effectAngle = (_obj.linearAngle != -999f) ? _obj.linearAngle : _obj.angle;
+          string effectName = string.IsNullOrEmpty(_obj.moveTrailEffectName) ? "dash-1" : _obj.moveTrailEffectName;
+          EffectsController.I.CreateEffect(effectName, _obj.transform.position, effectAngle);
+        }
+        _obj.moveTrailFrameCounter = 0;
+      }
+    }
+    UpdateKnockback(_obj);
+    
+    // Handle player acceleration/deceleration
+    UpdatePlayerAcceleration(_obj);
+  }
+
+  // Sets a constant-speed linear movement that continues until StopLinearMove is called.
+  public void SetLinearMove(InGameObject _obj, float _speed, float _angle){
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    _obj.isLinearMoving = true;
+    _obj.linearSpeed = _speed;
+    _obj.linearAngle = _angle;
+    // Do not rotate the PLAYER from movement on mobile; allow rotation otherwise
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (!(isPlayer && Helpers.IsMobile()) && !(isPlayer && SuppressPlayerFacingFromMovement)){
+      UpdateFacingByAngle(_obj, _angle);
+    }
+  }
+
+  // Stops the constant-speed linear movement.
+  public void StopLinearMove(InGameObject _obj){
+    _obj.isLinearMoving = false;
+    // Reset speed to 0 immediately to prevent momentum carry-over
+    _obj.currentSpeed = 0f;
+    _obj.linearSpeed = 0f;
+  }
+
+  // Applies position changes for linear movement. Uses same distance/z calc as regular movement.
+  public void UpdateLinearMove(InGameObject _obj){
+    if(_obj == null || _obj.gameObject == null) return;
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    if (!_obj.isLinearMoving || _obj.linearSpeed == 0f) return;
+
+    float rad = _obj.linearAngle * Mathf.Deg2Rad;
+    Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+    float yPos = _obj.transform.position.y + (dir.y * _obj.linearSpeed * Time.deltaTime);
+    _obj.transform.position = new Vector3(
+      _obj.transform.position.x + (dir.x * _obj.linearSpeed * Time.deltaTime),
+      yPos,
+      -19.5f
+    );
+    ClampWithinMissionBoundsIfCharacter(_obj);
+  }
+  public void UpdateDash(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    if (!_obj.isDash || _obj.dash == null || _obj.dash.duration <= 0f) return;
+
+    float rad = _obj.dash.angle * Mathf.Deg2Rad;
+    Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+    float moveX = dir.x * _obj.dash.speed * Time.deltaTime;
+    float moveY = dir.y * _obj.dash.speed * Time.deltaTime;
+
+    float yPos = _obj.transform.position.y + moveY;
+    _obj.transform.position = new Vector3(
+      _obj.transform.position.x + moveX,
+      yPos,
+      -19.5f
+    );
+    ClampWithinMissionBoundsIfCharacter(_obj);
+
+    // Dash Duration
+    _obj.dash.duration -= Time.deltaTime;
+    if (_obj.dash.duration <= 0f){
+      _obj.isDash = false;
+      _obj.dash.duration = 0f;
+      // Remove invulnerability when dash ends
+      _obj.isInvul = false;
+
+      // Fire any queued module trigger (e.g., melee queued during dash)
+      if (_obj.hasQueuedModuleTrigger && !string.IsNullOrEmpty(_obj.queuedModuleSlot)){
+        if (CharacterController.I != null && _obj.modules != null && _obj.modules.ContainsKey(_obj.queuedModuleSlot)){
+          CharacterController.I.TriggerModuleInSlot(_obj, _obj.queuedModuleSlot);
+        }
+      }
+      _obj.hasQueuedModuleTrigger = false;
+      _obj.queuedModuleSlot = null;
+    }
+
+    // Dash Effect
+    _obj.dash.frameCounter++;
+    if(_obj.dash.frameCounter >= 6){
+      EffectsController.I.CreateEffect(_obj.dash.effect, _obj.transform.position, _obj.dash.angle);
+      _obj.dash.frameCounter = 0;
+    }
+  }
+  #endregion
+
+  #region -- Homing --
+  public void SetHoming(InGameObject _obj, Transform _target, float _initialSpeed, float _maxSpeed, float _turnRateDegPerSec, float _acceleration){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    if (_obj.homing == null) _obj.homing = new HomingMovementDetails();
+    _obj.homing.isActive = (_target != null);
+    _obj.homing.target = _target;
+    _obj.homing.maxSpeed = Mathf.Max(0f, _maxSpeed);
+    _obj.homing.turnRate = Mathf.Max(0f, _turnRateDegPerSec);
+    _obj.homing.acceleration = Mathf.Max(0f, _acceleration);
+
+    // Initialize movement using linear system for translation
+    float curAngle = _obj.linearAngle;
+    if (float.IsNaN(curAngle) || Mathf.Abs(curAngle) < 0.0001f){
+      curAngle = _obj.angle;
+    }
+    MovementController.I.SetLinearMove(_obj, Mathf.Max(0f, _initialSpeed), curAngle);
+  }
+
+  public void StopHoming(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (_obj.homing == null) return;
+    _obj.homing.isActive = false;
+    _obj.homing.target = null;
+  }
+
+  public void UpdateHoming(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    if (_obj.homing == null || !_obj.homing.isActive || _obj.homing.target == null) return;
+
+    // Compute desired heading toward target
+    Vector3 tp = _obj.homing.target.position;
+    Vector2 toTarget = new Vector2(tp.x - _obj.transform.position.x, tp.y - _obj.transform.position.y);
+    if (toTarget.sqrMagnitude < 0.0001f){
+      return;
+    }
+
+    float desiredAngle = Mathf.Atan2(toTarget.y, toTarget.x) * Mathf.Rad2Deg;
+    float currentAngle = _obj.linearAngle;
+    // If not yet moving linearly, base on facing angle
+    if (!_obj.isLinearMoving){ currentAngle = _obj.angle; }
+
+    float maxDelta = _obj.homing.turnRate * Time.deltaTime;
+    float newAngle = Mathf.MoveTowardsAngle(currentAngle, desiredAngle, maxDelta);
+
+    // Accelerate toward max speed
+    float curSpeed = _obj.linearSpeed;
+    float targetSpeed = _obj.homing.maxSpeed;
+    if (_obj.homing.acceleration > 0f){
+      curSpeed = Mathf.MoveTowards(curSpeed, targetSpeed, _obj.homing.acceleration * Time.deltaTime);
+    } else {
+      curSpeed = targetSpeed;
+    }
+
+    // Apply to linear movement system
+    _obj.linearAngle = newAngle;
+    _obj.linearSpeed = curSpeed;
+    _obj.isLinearMoving = true;
+
+    // Update facing (except mobile player constraint handled in SetLinearMove)
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (!(isPlayer && Helpers.IsMobile())){
+      UpdateFacingByAngle(_obj, newAngle);
+    }
+  }
+  #endregion
+
+  #region -- Dash --
+  // Dashes the given object in the specified angle at a given speed for a given distance.
+  // Duration is computed as distance / speed. Reuses facing logic similar to SetWalk.
+  public void SetDash(InGameObject _obj, float _speed, float _angle, float _distance, string _effect = "dash-2"){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    if (_speed <= 0f || _distance <= 0f) return;
+
+    float duration = _speed > 0f ? (_distance / _speed) : 0f;
+    if (_obj.dash == null) _obj.dash = new DashingDetails();
+    _obj.dash.speed = _speed;
+    _obj.dash.angle = _angle;
+    _obj.dash.duration = duration;
+    _obj.dash.effect = _effect;
+
+    _obj.isDash = true;
+
+    // Grant invulnerability while dashing; cleared when dash ends
+    _obj.isInvul = true;
+
+    // Play dash sound effect for player
+    if (_obj.owner == 1 && SoundsController.I != null) {
+        SoundsController.I.PlaySound("engineboost");
+    }
+
+    // Facing strictly by angle
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (!(isPlayer && Helpers.IsMobile())){
+      UpdateFacingByAngle(_obj, _angle);
+    }
+  }
+  #endregion
+
+  #region -- Move To Target --
+  public void SetMoveToTarget(InGameObject _obj, Vector2 _targetPos, float _speed, float _stopDistance = 0.05f){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    var comp = _obj.moveToTarget;
+    comp.targetPos = _targetPos;
+    comp.speed = _speed;
+    comp.stopDistance = Mathf.Max(0f, _stopDistance);
+    comp.isActive = comp.speed > 0f;
+  }
+
+  public void StopMoveToTarget(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    _obj.moveToTarget.isActive = false;
+  } 
+
+  public void UpdateMoveToTarget(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    var comp = _obj.moveToTarget;
+    if (comp == null || !comp.isActive || comp.speed <= 0f) return;
+
+    Vector2 current = new Vector2(_obj.transform.position.x, _obj.transform.position.y);
+    Vector2 toTarget = comp.targetPos - current;
+    float dist = toTarget.magnitude;
+
+    if (dist <= comp.stopDistance){
+      // Snap to target and finish
+      float yPos = comp.targetPos.y;
+      _obj.transform.position = new Vector3(comp.targetPos.x, yPos, -19.5f);
+      ClampWithinMissionBoundsIfCharacter(_obj);
+      comp.isActive = false;
+      // Notify event handler
+      if (OnMoveToTargetFunctions.I != null) OnMoveToTargetFunctions.I.HandleReachedTarget(_obj);
+      return;
+    }
+
+    Vector2 dir = toTarget / dist; // normalized
+    float moveX = dir.x * comp.speed * Time.deltaTime;
+    float moveY = dir.y * comp.speed * Time.deltaTime;
+
+    float newY = _obj.transform.position.y + moveY;
+    _obj.transform.position = new Vector3(
+      _obj.transform.position.x + moveX,
+      newY,
+      -19.5f
+    );
+    ClampWithinMissionBoundsIfCharacter(_obj);
+
+    // Update facing based on direction
+    float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
+    // Do not rotate the PLAYER from movement on mobile
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (!(isPlayer && Helpers.IsMobile())){
+      UpdateFacingByAngle(_obj, angle);
+    }
+  }
+  
+  #endregion
+
+  #region -- Knockback --
+  public void SetKnockback(
+    InGameObject _obj,
+    float _speed,
+    float _angle,
+    float _duration,
+    float _bounciness = 0.8f,
+    float _friction = 0f,
+    int _maxBounces = 99
+  ){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (_obj.knockback == null) _obj.knockback = new KnockbackDetails();
+
+    // Knockback overrides other movement modes
+    _obj.isDash = false;
+    _obj.isLinearMoving = false;
+    if (_obj.moveToTarget != null) _obj.moveToTarget.isActive = false;
+
+    _obj.knockback.isActive = true;
+    _obj.knockback.speed = Mathf.Max(0f, _speed);
+    _obj.knockback.angle = _angle;
+    _obj.knockback.remaining = Mathf.Max(0f, _duration);
+    _obj.knockback.bounciness = Mathf.Clamp01(_bounciness);
+    _obj.knockback.friction = Mathf.Max(0f, _friction);
+    _obj.knockback.maxBounces = Mathf.Max(0, _maxBounces);
+
+    // Do not rotate the player due to knockback (recoil should not affect facing).
+    // Keep facing updates for non-player objects, respecting the existing mobile constraint.
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (!isPlayer && !(isPlayer && Helpers.IsMobile())){
+      UpdateFacingByAngle(_obj, _angle);
+    }
+  }
+
+  public void UpdateKnockback(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (_obj.knockback == null || !_obj.knockback.isActive) return;
+
+    var kb = _obj.knockback;
+    float dt = Time.deltaTime;
+
+    if (kb.remaining <= 0f || kb.speed <= 0.0001f){
+      kb.isActive = false;
+      return;
+    }
+
+    // Compute proposed next position
+    float rad = kb.angle * Mathf.Deg2Rad;
+    Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+    Vector3 cur = _obj.transform.position;
+    Vector3 next = new Vector3(
+      cur.x + dir.x * kb.speed * dt,
+      cur.y + dir.y * kb.speed * dt,
+      -19.5f
+    );
+
+    bool bounced = false;
+    Mission m = MissionController.I != null ? MissionController.I.mission : null;
+    if (m != null){
+      float minX = -m.sizeX, maxX = m.sizeX;
+      float minY = -m.sizeY, maxY = m.sizeY;
+
+      // Check horizontal walls
+      if (next.x < minX){
+        next.x = minX;
+        kb.angle = 180f - kb.angle; // reflect X
+        kb.speed *= kb.bounciness;
+        bounced = true;
+      } else if (next.x > maxX){
+        next.x = maxX;
+        kb.angle = 180f - kb.angle;
+        kb.speed *= kb.bounciness;
+        bounced = true;
+      }
+
+      // Recompute rad/dir after potential horizontal reflection
+      rad = kb.angle * Mathf.Deg2Rad;
+      dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+
+      // Check vertical walls
+      if (next.y < minY){
+        next.y = minY;
+        kb.angle = -kb.angle; // reflect Y
+        kb.speed *= kb.bounciness;
+        bounced = true;
+      } else if (next.y > maxY){
+        next.y = maxY;
+        kb.angle = -kb.angle;
+        kb.speed *= kb.bounciness;
+        bounced = true;
+      }
+
+      if (bounced && kb.maxBounces > 0){
+        kb.maxBounces--;
+        if (kb.maxBounces == 0){
+          // Stop further bouncing; you can also set isActive=false here if desired
+        }
+      }
+    }
+
+    // Apply position
+    _obj.transform.position = next;
+
+    // Do not rotate the player due to knockback (recoil should not affect facing).
+    // Keep facing updates for non-player objects, respecting the existing mobile constraint.
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (!isPlayer && !(isPlayer && Helpers.IsMobile())){
+      UpdateFacingByAngle(_obj, kb.angle);
+    }
+
+    // Friction and lifetime
+    if (kb.friction > 0f){
+      kb.speed -= kb.friction * dt;
+      if (kb.speed < 0f) kb.speed = 0f;
+    }
+    kb.remaining -= dt;
+
+    if (kb.remaining <= 0f || kb.speed <= 0.0001f){
+      kb.isActive = false;
+    }
+  }
+  #endregion
+
+  #region -- Helper Functions --
+  // Clamps character positions within mission bounds so they never cross borders.
+  void ClampWithinMissionBoundsIfCharacter(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (MissionController.I == null || MissionController.I.mission == null) return;
+    // Only clamp characters; missiles and effects are handled elsewhere
+    if (!string.Equals(_obj.type, "Character")) return;
+    var m = MissionController.I.mission;
+    Vector3 p = _obj.transform.position;
+    float maxX = m.sizeX;
+    float maxY = m.sizeY;
+    float clampedX = Mathf.Clamp(p.x, -maxX, maxX);
+    float clampedY = Mathf.Clamp(p.y, -maxY, maxY);
+    if (!Mathf.Approximately(clampedX, p.x) || !Mathf.Approximately(clampedY, p.y)){
+      _obj.transform.position = new Vector3(clampedX, clampedY, p.z);
+    }
+  }
+  // Public wrapper to allow aiming systems to set facing without changing movement state
+  public void FaceAngle(InGameObject _obj, float _angle){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (_obj.isTurnLocked) return;
+    // Allow facing when teleport-start buff is active even if CharacterCanMove is false
+    bool hasTeleportBuff = (BuffsController.I != null && BuffsController.I.HasBuff(_obj, "player-start-teleport"));
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj) && !hasTeleportBuff){
+      Debug.Log($"[MOVEMENT] FaceAngle blocked: CharacterCanMove=false, hasTeleportBuff={hasTeleportBuff}");
+      return;
+    }
+    // Do not allow mobile rotation for the player
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (isPlayer && Helpers.IsMobile() && !AllowPlayerRotationOnMobileOverride){
+      Debug.Log($"[MOVEMENT] FaceAngle blocked: isMobile check");
+      return;
+    }
+    _obj.angle = _angle;
+    UpdateFacingByAngle(_obj, _angle);
+  }
+
+  // Smoothly turns an object toward a target angle at a limited rate (degrees per second).
+  // Uses FaceAngle internally so it respects existing facing constraints.
+  public void TurnTowardAngle(InGameObject _obj, float targetAngle, float turnRateDegPerSec){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (_obj.isTurnLocked) return;
+    if (turnRateDegPerSec <= 0f){
+      FaceAngle(_obj, targetAngle);
+      return;
+    }
+
+    float maxDelta = turnRateDegPerSec * Time.deltaTime;
+    float newAngle = Mathf.MoveTowardsAngle(_obj.angle, targetAngle, maxDelta);
+    FaceAngle(_obj, newAngle);
+  }
+
+  // Helper: Faces the object according to the provided angle. Uses dir.x to pick left/right.
+  // If dir.x is approximately zero (purely vertical), the facing is left as-is.
+  void UpdateFacingByAngle(InGameObject _obj, float _angle){
+    if (_obj != null && _obj.isTurnLocked) return;
+    // Allow facing when teleport-start buff is active even if CharacterCanMove is false
+    bool hasTeleportBuff = (BuffsController.I != null && BuffsController.I.HasBuff(_obj, "player-start-teleport"));
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj) && !hasTeleportBuff) return;
+    // Do not allow mobile rotation for the player
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (isPlayer && Helpers.IsMobile() && !AllowPlayerRotationOnMobileOverride) return;
+
+    // Missiles: exempt from facing flip system. Just rotate by angle + offsets.
+    if (string.Equals(_obj.type, "Missile")){
+      float zMissile = _angle + _obj.rotationOffset + _obj.angleOffset;
+      _obj.transform.rotation = Quaternion.Euler(0f, 0f, zMissile);
+      return;
+    }
+    // 1) Determine desired facing from the horizontal component of the angle
+    float rad = _angle * Mathf.Deg2Rad;
+    float dirX = Mathf.Cos(rad);
+    const float epsilon = 0.0001f;
+    bool wantLeft = dirX < -epsilon ? true : (dirX > epsilon ? false : (_obj.facing == "left"));
+
+    // 2) Enforce no X flipping; instead flip Y when facing left
+    var sr = _obj.GetComponent<SpriteRenderer>();
+    if (sr != null){
+      if (sr.flipX) sr.flipX = false;                 // never flip X
+      sr.flipY = wantLeft;                            // flip Y only when facing left
+      // keep transform scale positive to avoid rotation anomalies
+      Vector3 s = _obj.transform.localScale;
+      if (s.x < 0f) s.x = Mathf.Abs(s.x);
+      if (s.y < 0f) s.y = Mathf.Abs(s.y);
+      _obj.transform.localScale = s;
+    } else {
+      // Fallback using transform scale: keep X positive, toggle Y sign
+      Vector3 s = _obj.transform.localScale;
+      s.x = Mathf.Abs(s.x);                           // no X flip
+      s.y = wantLeft ? -Mathf.Abs(s.y) : Mathf.Abs(s.y); // flip Y for left
+      _obj.transform.localScale = s;
+    }
+    _obj.facing = wantLeft ? "left" : "right";
+
+    // 3) Rotate toward the angle but clamp within ±90° of the current facing-forward to avoid upside-down
+    float forward = wantLeft ? 180f : 0f;
+    float delta = Mathf.DeltaAngle(forward, _angle);
+    float clamped = Mathf.Clamp(delta, -89.9f, 89.9f);
+    float z = forward + clamped + _obj.rotationOffset + _obj.angleOffset;
+    _obj.transform.rotation = Quaternion.Euler(0f, 0f, z);
+  }
+  #endregion
+
+  #region -- Player Acceleration System --
+  void UpdatePlayerAcceleration(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (Checks_MainGame.I != null && !Checks_MainGame.I.CharacterCanMove(_obj)) return;
+    
+    // Only apply to player
+    bool isPlayer = (MainGameController.I != null && _obj == MainGameController.I.player);
+    if (!isPlayer) return;
+    
+    // Skip if currently dashing
+    if (_obj.isDash) return;
+    
+    // Handle acceleration/deceleration based on input intent (supports drift)
+    // Use hasMoveInput (set by InputController) instead of isLinearMoving so we can coast when input is released.
+    bool isMoving = _obj.hasMoveInput;
+    
+    if (isMoving) {
+      // Check if this is a direction change (angle difference > 45 degrees)
+      if (_obj.linearAngle != -999f && _obj.lastMovementAngle != -999f) {
+        float angleDiff = Mathf.Abs(Mathf.DeltaAngle(_obj.linearAngle, _obj.lastMovementAngle));
+        if (angleDiff > 45f) {
+          // Direction changed - apply onTurnNewSpeed and remove dash buff
+          _obj.currentSpeed = _obj.onTurnNewSpeed;
+          _obj.linearSpeed = _obj.currentSpeed;
+          // Remove dash speed bonus buff if present
+          if (BuffsController.I != null) {
+            BuffsController.I.RemoveBuff(_obj, "dash-speed-bonus");
+          }
+        }
+      }
+      
+      // Store current angle for next frame
+      _obj.lastMovementAngle = _obj.linearAngle;
+      
+      // Accelerate toward max speed
+      float targetSpeed = _obj.maxSpeed;
+      _obj.currentSpeed = Mathf.MoveTowards(_obj.currentSpeed, targetSpeed, _obj.acceleration * Time.deltaTime);
+      
+      // Update linear movement speed to match current speed
+      _obj.linearSpeed = _obj.currentSpeed;
+    } else {
+      // Store angle when stopping
+      _obj.lastMovementAngle = _obj.linearAngle;
+      
+      // Decelerate toward 0 (drift). If driftDeceleration > 0, prefer it; otherwise use deceleration.
+      float decel = (_obj.driftDeceleration > 0f) ? _obj.driftDeceleration : _obj.deceleration;
+      _obj.currentSpeed = Mathf.MoveTowards(_obj.currentSpeed, 0f, decel * Time.deltaTime);
+      _obj.linearSpeed = _obj.currentSpeed;
+      
+      // Stop movement if speed is effectively 0
+      float threshold = (_obj.stopThreshold > 0f) ? _obj.stopThreshold : 0.01f;
+      if (_obj.currentSpeed <= threshold) {
+        _obj.currentSpeed = 0f;
+        StopLinearMove(_obj);
+      }
+    }
+  }
+  #endregion
+
+  #region -- Timed Life --
+  void UpdateTimedLife(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (_obj.timedLife <= 0f) return;
+    _obj.timedLife -= Time.deltaTime;
+    if (_obj.timedLife > 0f) return;
+    // Destroy depending on type
+    if (string.Equals(_obj.type, "Missile") && MissileController.I != null){
+      MissileController.I.DestroyMissile(_obj);
+      return;
+    }
+    if (OnDestroyFunctions.I != null){
+      OnDestroyFunctions.I.HandleOnDestroyExtraCodes(_obj);
+    }
+    Object.Destroy(_obj.gameObject);
+  }
+  #endregion
+
+}

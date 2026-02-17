@@ -1,0 +1,83 @@
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+
+public class MovementController : MonoBehaviour {
+  public static MovementController I;
+  void Awake() {
+    if (gameObject.scene != null && gameObject.scene.IsValid())
+    {
+      if (gameObject.scene.name != "Game")
+      {
+        Destroy(gameObject);
+        return;
+      }
+    }
+
+    if (I == null) { I = this; } 
+    else { Destroy(gameObject);} 
+  }
+
+  #region -- Linear Movement --
+  public void MoveUpdate(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    UpdateLinearMove(_obj);
+  }
+
+  public void SetLinearMove(InGameObject _obj, float _speed, float _angle){
+    if (_obj == null || _obj.gameObject == null) return;
+    _obj.isLinearMoving = true;
+    _obj.linearSpeed = _speed;
+    _obj.linearAngle = _angle;
+    UpdateFacingByAngle(_obj, _angle);
+  }
+
+  public void StopLinearMove(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    _obj.isLinearMoving = false;
+    _obj.currentSpeed = 0f;
+    _obj.linearSpeed = 0f;
+  }
+
+  public void UpdateLinearMove(InGameObject _obj){
+    if(_obj == null || _obj.gameObject == null) return;
+    if (!_obj.isLinearMoving || _obj.linearSpeed == 0f) return;
+
+    float rad = _obj.linearAngle * Mathf.Deg2Rad;
+    Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+    float yPos = _obj.transform.position.y + (dir.y * _obj.linearSpeed * Time.deltaTime);
+    _obj.transform.position = new Vector3(
+      _obj.transform.position.x + (dir.x * _obj.linearSpeed * Time.deltaTime),
+      yPos,
+      -19.5f
+    );
+    ClampWithinMissionBoundsIfCharacter(_obj);
+  }
+  #endregion
+
+  #region -- Helper Functions --
+  // Clamps character positions within mission bounds so they never cross borders.
+  void ClampWithinMissionBoundsIfCharacter(InGameObject _obj){
+    if (_obj == null || _obj.gameObject == null) return;
+    if (MissionController.I == null || MissionController.I.mission == null) return;
+    // Only clamp characters; missiles and effects are handled elsewhere
+    if (!string.Equals(_obj.type, "Character")) return;
+    var m = MissionController.I.mission;
+    Vector3 p = _obj.transform.position;
+    float maxX = m.sizeX;
+    float maxY = m.sizeY;
+    float clampedX = Mathf.Clamp(p.x, -maxX, maxX);
+    float clampedY = Mathf.Clamp(p.y, -maxY, maxY);
+    if (!Mathf.Approximately(clampedX, p.x) || !Mathf.Approximately(clampedY, p.y)){
+      _obj.transform.position = new Vector3(clampedX, clampedY, p.z);
+    }
+  }
+
+  // Helper: simple rotation to angle with offsets
+  void UpdateFacingByAngle(InGameObject _obj, float _angle){
+    if (_obj == null || _obj.gameObject == null) return;
+    float z = _angle + _obj.rotationOffset + _obj.angleOffset;
+    _obj.transform.rotation = Quaternion.Euler(0f, 0f, z);
+  }
+  #endregion
+}
