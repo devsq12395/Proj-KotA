@@ -22,6 +22,8 @@ public class CharacterController : MonoBehaviour {
 
     if (I == null) { I = this; }
     else { Destroy(gameObject); }
+
+    if (characters == null) characters = new List<InGameObject>();
   }
 
   public List<InGameObject> characters;
@@ -32,6 +34,10 @@ public class CharacterController : MonoBehaviour {
     
   }
   #endregion
+
+  void Update(){
+    OnUpdate();
+  }
 
   #region -- Create --
   public InGameObject CreateCharacter(string _name, Vector2 _pos, int _owner){
@@ -49,6 +55,11 @@ public class CharacterController : MonoBehaviour {
     InGameObject _inGameObject = _newChar.GetComponent<InGameObject>();
     characters.Add(_inGameObject);
     _inGameObject.owner = _owner;
+
+    // Ensure AIBase is present to execute RTS orders and drive movement updates
+    var ai = _newChar.GetComponent<AIBase>();
+    if (ai == null) ai = _newChar.AddComponent<AIBase>();
+    ai.enabled = true;
 
     return _inGameObject;
   }
@@ -75,15 +86,23 @@ public class CharacterController : MonoBehaviour {
 
   #region -- On Update --
   public void OnUpdate(){
-    foreach(InGameObject _char in characters){
-      if(charactersToDestroy.Count > 0){
-        foreach(var _c in charactersToDestroy){
-          if(_c == null) continue; 
-          OnDestroyFunctions.I.HandleOnDestroyExtraCodes(_c);
-          if(characters.Contains(_c)) characters.Remove(_c);
-          Destroy(_c.gameObject);
-        }
-        charactersToDestroy.Clear();
+    // Process deferred destroys once
+    if(charactersToDestroy.Count > 0){
+      foreach(var _c in charactersToDestroy){
+        if(_c == null) continue; 
+        OnDestroyFunctions.I.HandleOnDestroyExtraCodes(_c);
+        if(characters != null && characters.Contains(_c)) characters.Remove(_c);
+        if(_c.gameObject != null) Destroy(_c.gameObject);
+      }
+      charactersToDestroy.Clear();
+    }
+
+    // Drive per-character movement updates
+    if (characters != null && MovementController.I != null){
+      for(int i = 0; i < characters.Count; i++){
+        var ch = characters[i];
+        if (ch == null || ch.gameObject == null) continue;
+        MovementController.I.MoveUpdate(ch);
       }
     }
   }

@@ -21,6 +21,10 @@ public class InGameObject : MonoBehaviour {
   public float zPos;
   public int id, owner;
 
+  // RTS Orders
+  public Order currentOrder;
+  public float engagementRadius = 8f;
+
   // Booleans
   public bool isRunning, isAtk, isInvul, isAI;
 

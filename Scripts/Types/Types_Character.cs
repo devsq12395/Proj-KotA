@@ -26,3 +26,18 @@ public class MovementData {
   public float rotationOffset; // degrees to align sprites
   public float angleOffset;    // extra rotation offset per object
 }
+
+[Serializable]
+public enum OrderType {
+  None,
+  Move,
+  AttackMove
+}
+
+[Serializable]
+public class Order {
+  public OrderType type = OrderType.None;
+  public Vector2 targetPos;
+  public float stopDistance = 0.25f;
+  public float issuedTime;
+}
